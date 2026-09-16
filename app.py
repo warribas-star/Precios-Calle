@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 import re
@@ -245,7 +244,7 @@ with st.sidebar.expander("🔎 Calidad de datos", expanded=False):
         st.success("Sin inconsistencias detectadas")
 
 # ============================================================
-# SIDEBAR - FILTROS
+# SIDEBAR - FILTROS (en cascada: Mes → Cliente → División → Producto)
 # ============================================================
 st.sidebar.title("🔍 Filtros")
 
@@ -253,32 +252,39 @@ with st.sidebar.expander("📁 Archivos cargados"):
     for a in archivos_cargados:
         st.caption(os.path.basename(a))
 
+# --- 1. Mes ---
 meses_disponibles = sorted(df[COL_MES].dropna().unique())
 mes_sel = st.sidebar.multiselect("Mes", meses_disponibles, default=meses_disponibles)
 
-divisiones = sorted(df[COL_DIVISION].dropna().unique())
-division_sel = st.sidebar.multiselect("División", divisiones, default=divisiones)
+df_base_mes = df[df[COL_MES].isin(mes_sel)]
 
-clientes = sorted(df[COL_RAZON].dropna().unique())
-cliente_sel = st.sidebar.multiselect("Cliente", clientes)
+# --- 2. Cliente ---
+clientes_disponibles = sorted(df_base_mes[COL_RAZON].dropna().unique())
+cliente_sel = st.sidebar.multiselect("Cliente", clientes_disponibles)
 
-# --- Filtro base (Mes + División + Cliente) aplicado ANTES del producto ---
-df_base = df[df[COL_MES].isin(mes_sel) & df[COL_DIVISION].isin(division_sel)]
-
+df_base_cliente = df_base_mes
 if cliente_sel:
-    df_base = df_base[df_base[COL_RAZON].isin(cliente_sel)]
-
-# --- Desplegable de producto: solo lo que ese cliente compró ---
-productos_disponibles = sorted(df_base[COL_DESC].dropna().unique())
-producto_sel = st.sidebar.multiselect(
-    "Producto (según compras del cliente)", productos_disponibles
-)
+    df_base_cliente = df_base_cliente[df_base_cliente[COL_RAZON].isin(cliente_sel)]
 
 if not cliente_sel:
-    st.sidebar.caption("💡 Seleccioná un cliente para acotar la lista de productos")
+    st.sidebar.caption("💡 Seleccioná un cliente para acotar división y producto")
+
+# --- 3. División (según cliente seleccionado) ---
+divisiones_disponibles = sorted(df_base_cliente[COL_DIVISION].dropna().unique())
+division_sel = st.sidebar.multiselect(
+    "División", divisiones_disponibles, default=divisiones_disponibles
+)
+
+df_base_division = df_base_cliente[df_base_cliente[COL_DIVISION].isin(division_sel)]
+
+# --- 4. Producto (según cliente + división seleccionados) ---
+productos_disponibles = sorted(df_base_division[COL_DESC].dropna().unique())
+producto_sel = st.sidebar.multiselect(
+    "Producto (según cliente y división seleccionados)", productos_disponibles
+)
 
 # --- Filtro final ---
-df_filtrado = df_base
+df_filtrado = df_base_division
 if producto_sel:
     df_filtrado = df_filtrado[df_filtrado[COL_DESC].isin(producto_sel)]
 
@@ -341,7 +347,7 @@ columnas_visibles = [
 
 df_vista = df_ordenado[columnas_visibles].copy()
 
-# --- Opción 2: formateamos como texto directamente (sin Styler) ---
+# --- Formateamos como texto directamente (sin Styler) ---
 # Esto evita el límite de celdas de Pandas Styler y es más rápido
 # en tablas grandes.
 df_mostrar = df_vista.copy()

@@ -1,344 +1,174 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
-import json
 import re
-import unicodedata
+import plotly.express as px
+from datetime import datetime, timedelta
 
-st.set_page_config(page_title="Precios en la Calle", layout="wide")
+st.set_page_config(page_title="Precios en la calle", layout="wide")
 
-st.title("📊 Precios en la Calle - GT")
+ARCHIVO = "Precios en la calle GT 08-09 2026.xlsx"
+HOJA = "datos"
 
-# ------------------------------
-# 1. CARGA DE DATOS (mes actual + mes anterior)
-# ------------------------------
-ARCHIVO_MES_ACTUAL = "mes actual.xlsx"
-ARCHIVO_MES_ANTERIOR = "mes anterior.xlsx"
-NOMBRE_HOJA = "Hoja2"
-FILA_ENCABEZADOS = 3  # Los encabezados están en la fila 4 del Excel (índice 3)
+COL_MES = "Mes"
+COL_FECHA = "Fecha Comprobante"
+COL_CLIENTE = "Cliente"
+COL_RAZON = "Razon Social"
+COL_DIVISION = "Descripción DIVISION"
+COL_CODIGO = "Codigo de Articulo"
+COL_DESC = "Descripcion de Articulo"
+COL_PTR = "Suma de PTR"
+COL_PTC = "PTC"
 
-COLUMNAS_REQUERIDAS = [
-    "Mes",
-    "Fecha Comprobante",
-    "Cliente",
-    "Razon Social",
-    "Codigo de Articulo",
-    "Descripcion de Articulo",
-    "Descripción DIVISION",
-    "Btos",
-    "% desc",
-    "Suma de PTR",
-    "PTR unit",
-    "PTC",
-]
 
-# ------------------------------
-# Normalización de nombres de columnas
-# ------------------------------
-def normalizar(texto):
-    texto = str(texto)
-    texto = texto.strip()
-    texto = re.sub(r"\s+", " ", texto)
-    texto_sin_acentos = "".join(
-        c for c in unicodedata.normalize("NFKD", texto)
-        if not unicodedata.combining(c)
-    )
-    return texto_sin_acentos.lower()
-
-ALIAS_A_CANONICO = {
-    normalizar("Mes"): "Mes",
-    normalizar("Fecha Comprobante"): "Fecha Comprobante",
-    normalizar("Cliente"): "Cliente",
-    normalizar("Razon Social"): "Razon Social",
-    normalizar("Codigo de Articulo"): "Codigo de Articulo",
-    normalizar("Descripcion de Articulo"): "Descripcion de Articulo",
-    normalizar("Descripción DIVISION"): "Descripción DIVISION",
-    normalizar("Btos"): "Btos",
-    normalizar("% desc"): "% desc",
-    normalizar("Suma de PTR"): "Suma de PTR",
-    normalizar("PTR unit"): "PTR unit",
-    normalizar("PTR Unit"): "PTR unit",
-    normalizar("PTC"): "PTC",
-}
-
-def normalizar_columnas(df):
-    nuevas_columnas = {}
-    for col in df.columns:
-        clave = normalizar(col)
-        if clave in ALIAS_A_CANONICO:
-            nuevas_columnas[col] = ALIAS_A_CANONICO[clave]
-    return df.rename(columns=nuevas_columnas)
-
-@st.cache_data
-def cargar_datos(path):
-    df = pd.read_excel(path, sheet_name=NOMBRE_HOJA, header=FILA_ENCABEZADOS)
-    df.columns = [str(c).strip() for c in df.columns]
-    df = normalizar_columnas(df)
-    return df
-
-@st.cache_data
-def cargar_y_combinar(archivos):
-    dfs = []
-    info_columnas = {}
-    for a in archivos:
-        try:
-            d = cargar_datos(a)
-            info_columnas[a] = list(d.columns)
-            dfs.append(d)
-        except Exception as e:
-            st.error(f"No se pudo leer '{a}': {e}")
-    if not dfs:
-        return pd.DataFrame(), info_columnas
-    return pd.concat(dfs, ignore_index=True), info_columnas
-
-df, info_columnas = cargar_y_combinar([ARCHIVO_MES_ACTUAL, ARCHIVO_MES_ANTERIOR])
-
-if df.empty:
-    st.error(
-        "No se pudieron cargar los datos. Verificá que existan los archivos "
-        f"'{ARCHIVO_MES_ACTUAL}' y '{ARCHIVO_MES_ANTERIOR}' en la carpeta del proyecto, "
-        f"y que tengan una hoja llamada '{NOMBRE_HOJA}'."
-    )
-    st.stop()
-
-with st.expander("🔍 Ver columnas detectadas en cada archivo"):
-    for archivo, cols in info_columnas.items():
-        st.write(f"**{archivo}**:", cols)
-
-# ------------------------------
-# Validación de columnas requeridas
-# ------------------------------
-faltantes = [c for c in COLUMNAS_REQUERIDAS if c not in df.columns]
-
-if faltantes:
-    st.error(
-        "❌ Faltan columnas requeridas en los datos combinados: "
-        f"{faltantes}\n\n"
-        "Revisá el expander de arriba para ver qué columnas tiene cada archivo "
-        "y corregí los nombres en el Excel (o avisame para ajustar el código)."
-    )
-    st.stop()
-
-# Etiqueta más legible para elegir clientes (Código - Razón Social)
-df["Cliente_label"] = df["Cliente"].astype(str) + " - " + df["Razon Social"].astype(str)
-
-# ------------------------------
-# Convertir Fecha Comprobante
-# ------------------------------
-def convertir_fecha(serie):
-    if pd.api.types.is_datetime64_any_dtype(serie):
-        return serie
-
-    fecha_directa = pd.to_datetime(serie, errors="coerce", dayfirst=True)
-    if fecha_directa.notna().mean() > 0.5:
-        return fecha_directa
-
-    serie_numerica = pd.to_numeric(serie, errors="coerce")
-    return pd.to_datetime(serie_numerica, unit="D", origin="1899-12-30", errors="coerce")
-
-df["Fecha Comprobante"] = convertir_fecha(df["Fecha Comprobante"])
-
-# ------------------------------
-# Limpiar columna "Mes"
-# (algunas celdas vienen como JSON tipo {"formula":"","result":9}
-#  y siempre debe quedar como entero, sin decimales)
-# ------------------------------
-def limpiar_mes(valor):
-    if isinstance(valor, str) and valor.strip().startswith("{"):
-        try:
-            data = json.loads(valor)
-            valor = data.get("result", valor)
-        except (json.JSONDecodeError, TypeError):
-            pass
+def extraer_mes(valor):
+    if valor is None:
+        return None
+    valor = str(valor).strip()
+    if valor.startswith("{"):
+        match = re.search(r'"result"\s*:\s*(-?\d+\.?\d*)', valor)
+        return int(float(match.group(1))) if match else None
     try:
         return int(float(valor))
+    except ValueError:
+        return None
+
+
+def serial_a_fecha(valor):
+    """Convierte el número de serie de Excel a fecha real."""
+    try:
+        num = float(valor)
+        return (datetime(1899, 12, 30) + timedelta(days=num)).date()
     except (ValueError, TypeError):
-        return valor
+        return None
 
-df["Mes"] = df["Mes"].apply(limpiar_mes)
 
-# ------------------------------
-# 2. FILTROS (arriba, en la página principal)
-# ------------------------------
-st.markdown("### 🔎 Filtros")
+@st.cache_data
+def cargar_datos():
+    df = pd.read_excel(ARCHIVO, sheet_name=HOJA, dtype=str)
 
-fcol1, fcol2, fcol3, fcol4 = st.columns(4)
+    # Limpiar mes (por si viene con formato JSON de fórmula)
+    df[COL_MES] = df[COL_MES].apply(extraer_mes)
 
-with fcol1:
-    clientes_sel = st.multiselect(
-        "Cliente (dejar vacío = todos)",
-        options=sorted(df["Cliente_label"].dropna().unique()),
+    # Convertir fecha de número de serie a fecha real
+    df[COL_FECHA] = df[COL_FECHA].apply(serial_a_fecha)
+
+    # Completar división faltante cruzando por código de artículo
+    dicc_div = (
+        df.dropna(subset=[COL_CODIGO, COL_DIVISION])
+        .groupby(COL_CODIGO)[COL_DIVISION]
+        .agg(lambda x: x.mode().iloc[0] if not x.mode().empty else None)
+        .to_dict()
     )
+    df[COL_DIVISION] = df[COL_DIVISION].fillna(df[COL_CODIGO].map(dicc_div))
 
-if clientes_sel:
-    df_base = df[df["Cliente_label"].isin(clientes_sel)]
-else:
-    df_base = df.copy()
-
-def multiselect_filtro(contenedor, dframe, col_nombre, label, default=None):
-    if col_nombre not in dframe.columns:
-        contenedor.warning(f"⚠️ No se encontró la columna '{col_nombre}'")
-        return []
-    opciones = sorted(dframe[col_nombre].dropna().unique())
-    if default is None:
-        default = []
-    else:
-        default = [d for d in default if d in opciones]
-    seleccion = contenedor.multiselect(label, opciones, default=default, key=f"filtro_{col_nombre}")
-    return seleccion
-
-with fcol2:
-    meses = multiselect_filtro(st, df_base, "Mes", "Mes")
-
-with fcol3:
-    divisiones = multiselect_filtro(st, df_base, "Descripción DIVISION", "División")
-
-codigo_default = 7634
-desc_default = df_base.loc[
-    pd.to_numeric(df_base["Codigo de Articulo"], errors="coerce") == codigo_default,
-    "Descripcion de Articulo"
-].dropna().unique()
-desc_default = list(desc_default)
-
-with fcol4:
-    productos = multiselect_filtro(
-        st, df_base, "Descripcion de Articulo", "Producto", default=desc_default
+    # Completar código faltante cruzando por descripción de artículo
+    dicc_cod = (
+        df.dropna(subset=[COL_DESC, COL_CODIGO])
+        .groupby(COL_DESC)[COL_CODIGO]
+        .agg(lambda x: x.mode().iloc[0] if not x.mode().empty else None)
+        .to_dict()
     )
+    df[COL_CODIGO] = df[COL_CODIGO].fillna(df[COL_DESC].map(dicc_cod))
 
-df_filtrado = df_base.copy()
+    # Convertir columnas numéricas
+    for col in [COL_PTR, COL_PTC]:
+        df[col] = (
+            df[col].astype(str)
+            .str.replace(r"[^\d.,-]", "", regex=True)
+            .str.replace(",", "", regex=False)
+        )
+        df[col] = pd.to_numeric(df[col], errors="coerce")
 
-if meses:
-    df_filtrado = df_filtrado[df_filtrado["Mes"].isin(meses)]
-if divisiones:
-    df_filtrado = df_filtrado[df_filtrado["Descripción DIVISION"].isin(divisiones)]
-if productos:
-    df_filtrado = df_filtrado[df_filtrado["Descripcion de Articulo"].isin(productos)]
+    return df
 
-st.markdown("---")
 
-# ------------------------------
-# 3. MÉTRICAS RÁPIDAS
-# ------------------------------
-col1, col2, col3, col4 = st.columns(4)
+df = cargar_datos()
 
-col1.metric("Registros", len(df_filtrado))
-col2.metric("Bultos totales", round(df_filtrado["Btos"].sum(), 2) if "Btos" in df_filtrado else "-")
-col3.metric("PTR promedio", round(df_filtrado["PTR unit"].mean(), 2) if "PTR unit" in df_filtrado else "-")
-col4.metric("PTC promedio", round(df_filtrado["PTC"].mean(), 2) if "PTC" in df_filtrado else "-")
+# ============================================================
+# SIDEBAR - FILTROS
+# ============================================================
+st.sidebar.title("🔍 Filtros")
 
-# ------------------------------
-# 4. CUADRO DE VOLUMEN POR DIVISIÓN Y MES
-# ------------------------------
-st.markdown("---")
-st.subheader("📦 Volumen (Bultos) por División y Mes")
+meses_disponibles = sorted(df[COL_MES].dropna().unique())
+mes_sel = st.sidebar.multiselect("Mes", meses_disponibles, default=meses_disponibles)
 
-if df_base.empty:
-    st.warning("No hay datos para ese cliente.")
-else:
-    pivot = pd.pivot_table(
-        df_base,
-        values="Btos",
-        index="Descripción DIVISION",
-        columns="Mes",
-        aggfunc="sum",
-        fill_value=0,
-    )
+divisiones = sorted(df[COL_DIVISION].dropna().unique())
+division_sel = st.sidebar.multiselect("División", divisiones, default=divisiones)
 
-    tabla_html = pivot.style.format("{:,.1f}").to_html()
-    st.markdown(
-        f"""
-        <style>
-        .pivot-table table {{
-            width: auto !important;
-            border-collapse: collapse;
-        }}
-        .pivot-table th, .pivot-table td {{
-            padding: 4px 10px !important;
-            white-space: nowrap;
-            text-align: right;
-            border: 1px solid #444;
-        }}
-        </style>
-        <div class="pivot-table">
-        {tabla_html}
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+clientes = sorted(df[COL_RAZON].dropna().unique())
+cliente_sel = st.sidebar.multiselect("Cliente", clientes)
 
-    csv_pivot = pivot.to_csv().encode("utf-8")
-    st.download_button(
-        "📥 Descargar este cuadro (CSV)",
-        csv_pivot,
-        "volumen_division_mes.csv",
-        "text/csv",
-        key="download_pivot"
-    )
+buscar_producto = st.sidebar.text_input("Buscar producto")
 
-st.markdown("---")
+# Aplicar filtros
+df_filtrado = df[df[COL_MES].isin(mes_sel) & df[COL_DIVISION].isin(division_sel)]
 
-# ------------------------------
-# 5. TABLA DETALLE
-# ------------------------------
-st.subheader("📋 Detalle de precios")
+if cliente_sel:
+    df_filtrado = df_filtrado[df_filtrado[COL_RAZON].isin(cliente_sel)]
 
-columnas_detalle = [
-    "Fecha Comprobante",
-    "Codigo de Articulo",
-    "Descripcion de Articulo",
-    "Btos",
-    "% desc",
-    "Suma de PTR",
-    "PTR unit",
-    "PTC",
-]
+if buscar_producto:
+    df_filtrado = df_filtrado[
+        df_filtrado[COL_DESC].str.contains(buscar_producto, case=False, na=False)
+    ]
 
-columnas_disponibles = [c for c in columnas_detalle if c in df_filtrado.columns]
+# ============================================================
+# CONTENIDO PRINCIPAL
+# ============================================================
+st.title("📊 Precios en la Calle - GT 08/09 2026")
 
-df_detalle = df_filtrado[columnas_disponibles].rename(columns={
-    "Fecha Comprobante": "Fecha",
-    "Codigo de Articulo": "Código de Producto",
-    "Descripcion de Articulo": "Descripción de Producto",
-    "Btos": "Bultos",
-    "% desc": "Descuento (%)",
-    "Suma de PTR": "PTR Total",
-})
+col1, col2, col3 = st.columns(3)
+col1.metric("Registros filtrados", f"{len(df_filtrado):,}")
+col2.metric("Suma PTR", f"$ {df_filtrado[COL_PTR].sum():,.2f}")
+col3.metric("Clientes únicos", df_filtrado[COL_RAZON].nunique())
 
-st.dataframe(df_detalle, use_container_width=True)
+st.divider()
 
-# ------------------------------
-# 6. GRÁFICO DE EVOLUCIÓN DE PRECIOS
-# ------------------------------
-st.subheader("📈 Evolución de precios (PTR unit)")
+# Gráfico por división
+st.subheader("💰 PTR por División")
+resumen_division = (
+    df_filtrado.groupby(COL_DIVISION)[COL_PTR]
+    .sum()
+    .sort_values(ascending=False)
+    .reset_index()
+)
+fig = px.bar(resumen_division, x=COL_DIVISION, y=COL_PTR, text_auto=".2s")
+st.plotly_chart(fig, use_container_width=True)
 
-if not productos:
-    st.info("👆 Seleccioná al menos un **Producto** en los filtros de arriba para ver su evolución de precios.")
-elif "Fecha Comprobante" in df_filtrado.columns and "PTR unit" in df_filtrado.columns:
-    df_evol = (
-        df_filtrado.groupby(["Fecha Comprobante", "Descripcion de Articulo"])["PTR unit"]
-        .mean()
+# Comparativo entre meses
+if len(mes_sel) >= 2:
+    st.subheader("📈 Comparativo entre meses")
+    comparativo = (
+        df_filtrado.groupby([COL_MES, COL_DIVISION])[COL_PTR]
+        .sum()
         .reset_index()
-        .sort_values("Fecha Comprobante")
     )
-    fig = px.line(
-        df_evol,
-        x="Fecha Comprobante",
-        y="PTR unit",
-        color="Descripcion de Articulo",
-        markers=True,
-        title="Evolución del PTR unit por producto",
+    fig2 = px.bar(
+        comparativo, x=COL_DIVISION, y=COL_PTR, color=COL_MES,
+        barmode="group", text_auto=".2s"
     )
-    fig.update_xaxes(tickformat="%d-%b-%Y")
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig2, use_container_width=True)
 
-# ------------------------------
-# 7. DESCARGA GENERAL
-# ------------------------------
-st.markdown("---")
-csv = df_filtrado.to_csv(index=False).encode("utf-8")
+st.divider()
+
+# ============================================================
+# TABLA DE DETALLE - Ordenada por fecha, más reciente primero
+# ============================================================
+st.subheader("📋 Detalle de registros")
+
+df_ordenado = df_filtrado.sort_values(by=COL_FECHA, ascending=False)
+
+st.dataframe(
+    df_ordenado[[COL_MES, COL_FECHA, COL_CLIENTE, COL_RAZON, COL_DIVISION,
+                 COL_CODIGO, COL_DESC, COL_PTR, COL_PTC]],
+    use_container_width=True,
+    height=400,
+)
+
+# Descarga (también ordenada por fecha descendente)
+csv = df_ordenado.to_csv(index=False).encode("utf-8")
 st.download_button(
-    "📥 Descargar filtro actual (CSV)",
+    "⬇️ Descargar tabla filtrada (CSV)",
     csv,
-    "precios_filtrados.csv",
+    "datos_filtrados.csv",
     "text/csv",
 )

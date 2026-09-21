@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import re
 import os
+import base64
 import unicodedata
 from datetime import datetime, timedelta
 
@@ -37,6 +38,40 @@ COLUMNAS_ESPERADAS = [
     COL_DESC, COL_UXB, COL_DESC_PCT, COL_BTOS, COL_PTR,
     COL_PTR_UNIT, COL_PTC, COL_MES,
 ]
+
+# ============================================================
+# LOGO EN ESQUINA SUPERIOR DERECHA
+# ============================================================
+def agregar_logo_esquina(ruta_imagen, ancho=180):
+    with open(ruta_imagen, "rb") as f:
+        datos = base64.b64encode(f.read()).decode()
+
+    st.markdown(
+        f"""
+        <style>
+        .logo-esquina {{
+            position: fixed;
+            top: 12px;
+            right: 25px;
+            z-index: 9999;
+        }}
+        .logo-esquina img {{
+            width: {ancho}px;
+        }}
+        </style>
+        <div class="logo-esquina">
+            <img src="data:image/png;base64,{datos}">
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+ruta_logo = os.path.join(CARPETA_APP, "logo.png")
+if os.path.exists(ruta_logo):
+    agregar_logo_esquina(ruta_logo)
+else:
+    st.warning("⚠️ No se encontró el archivo 'logo.png' en la carpeta de la app.")
 
 
 # ============================================================
@@ -87,22 +122,33 @@ def extraer_mes(valor):
 
 
 def serial_a_fecha(valor):
+    """Convierte un valor de Excel (serial o texto) a un objeto date,
+    interpretando el texto en formato día-mes-año (D-M-AAAA)."""
     if valor is None or str(valor).strip() == "" or str(valor).strip().lower() == "nan":
         return None
 
     valor_str = str(valor).strip()
 
+    # Caso: número serial de Excel
     try:
         num = float(valor_str)
         return (datetime(1899, 12, 30) + timedelta(days=num)).date()
     except ValueError:
         pass
 
+    # Caso: texto con fecha (día-mes-año)
     try:
         fecha = pd.to_datetime(valor_str, dayfirst=True, errors="coerce")
         return fecha.date() if pd.notna(fecha) else None
     except Exception:
         return None
+
+
+def formato_fecha_ar(valor):
+    """Formatea una fecha (date) como texto DD/MM/AAAA."""
+    if valor is None or pd.isna(valor):
+        return ""
+    return valor.strftime("%d/%m/%Y")
 
 
 def limpiar_numero(valor):
@@ -338,9 +384,10 @@ st.subheader("📋 Detalle de registros")
 df_ordenado = df_filtrado.sort_values(by=COL_FECHA, ascending=False)
 
 # Columnas visibles en la tabla
-# (se ocultan "Suma de PTR" y "Unidades por Bulto")
+# (se ocultan "Descripcion DIVISION", "Suma de PTR" y "Unidades por Bulto";
+#  el índice también se oculta al mostrar la tabla)
 columnas_visibles = [
-    COL_MES, COL_FECHA, COL_CLIENTE, COL_RAZON, COL_DIVISION,
+    COL_MES, COL_FECHA, COL_CLIENTE, COL_RAZON,
     COL_CODIGO, COL_DESC, COL_DESC_PCT, COL_BTOS,
     COL_PTR_UNIT, COL_PTC,
 ]
@@ -352,6 +399,7 @@ df_vista = df_ordenado[columnas_visibles].copy()
 # en tablas grandes.
 df_mostrar = df_vista.copy()
 df_mostrar[COL_MES] = df_mostrar[COL_MES].apply(formato_mes)
+df_mostrar[COL_FECHA] = df_mostrar[COL_FECHA].apply(formato_fecha_ar)
 df_mostrar[COL_DESC_PCT] = df_mostrar[COL_DESC_PCT].apply(formato_porcentaje)
 df_mostrar[COL_BTOS] = df_mostrar[COL_BTOS].apply(formato_bultos)
 df_mostrar[COL_PTR_UNIT] = df_mostrar[COL_PTR_UNIT].apply(formato_pesos_ar)
@@ -367,6 +415,7 @@ st.dataframe(
     df_mostrar,
     height=500,
     column_config=config_detalle,
+    hide_index=True,
 )
 
 # Descarga (mantiene todas las columnas originales, incluidas "Suma de PTR" y
